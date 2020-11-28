@@ -1,0 +1,170 @@
+rm(list = ls())
+library(FNN)
+library(nnet)
+library(glmnet)
+library(mgcv)   # For GAM
+library(klaR)   # For naive Bayes
+library(randomForest)
+
+source("Helper Functions.R")
+df = read.csv("Original_data/P2Data2020.csv")
+df$Y = as.factor(df$Y)
+
+require(parallel)  
+nc <- 12   ## cluster size, set for example portability
+if (detectCores()>1) { ## no point otherwise
+  cl <- makeCluster(nc) 
+  ## could also use makeForkCluster, but read warnings first!
+} else cl <- NULL
+
+X = df[,-1]
+Y = df[,1]
+
+data.matrix.raw = model.matrix(Y ~ ., data = df)
+data.matrix = data.matrix.raw[,-1]
+
+# set.seed(100)
+V = 10    # 10-fold Cross-Validation
+R = 1     # number of Replicates
+n = nrow(X)
+folds = get.folds(n,V) 
+names = c("Knn-1","Knn-min","Knn-1se","Logistic","Logist-glmnet","Logist-LASSO-min","Logist-LASSO-1se","LDA","QDA",
+          "GAM","NB:Normal","NB:Kernel","NB:Normal PC","NB:Kernel PC","RF")
+misclass_df = matrix(NA,ncol = length(names), nrow = V*R)
+colnames(misclass_df) <- names
+
+current_row = 1
+for (i in 1:R) {
+  for(v in 1:V){
+    train_df = df[folds!=v,]
+    valid_df = df[folds==v,]
+    train_matrix = model.matrix(Y ~ . ,train_df)
+    valid_matrix = model.matrix(Y ~ . ,valid_df)
+    
+    train_df_scaled = cbind(train_df[,1],scale.1(train_df[,-1],train_df[,-1]))
+    valid_df_scaled = cbind(valid_df[,1],scale.1(valid_df[,-1],train_df[,-1]))
+    # Knn-min
+    cv.knn = knn(train_df_scaled[,-1],valid_df_scaled[,-1],train_df_scaled[,1],k = 1)
+    misclass_df[current_row,1] = mean(cv.knn != valid_df_scaled[,1])
+    
+    # Knn-min
+    kmax <- 100
+    k <- matrix(c(1:kmax), nrow=kmax)
+    runknn <- function(x){
+      knncv.fit <- knn.cv(train=train_df_scaled[,-1], cl=train_df_scaled[,1], k=x)
+      # Fitted values are for deleted data from CV
+      mean(ifelse(knncv.fit == train_df_scaled[,1], yes=0, no=1))
+    }
+    mis <- apply(X=k, MARGIN=1, FUN=runknn)
+    mis.se <- sqrt(mis*(1-mis)/nrow(train_df_scaled)) #SE of misclass rates
+    
+    # Min rule
+    mink = which.min(mis)
+    knnfitmin.2 <- knn(train=train_df_scaled[,-1], test=valid_df_scaled[,-1], cl=train_df_scaled[,1], k=mink)
+    misclass_df[current_row,2] = mean(knnfitmin.2!= valid_df_scaled[,1])
+    
+    # 1SE rule
+    serule = max(which(mis<mis[mink]+mis.se[mink]))
+    knnfitse.2 <- knn(train=train_df_scaled[,-1], test=valid_df_scaled[,-1], cl=train_df_scaled[,1], k=serule)
+    misclass_df[current_row,3] = mean(knnfitse.2!= valid_df_scaled[,1])
+    
+    
+    # Logistic
+    train_df_scaled2 = data.frame(cbind(class = train_df[,1],rescale(train_df[,-1],train_df[,-1])))
+    valid_df_scaled2 = data.frame(cbind(class = valid_df[,1],rescale(valid_df[,-1],train_df[,-1])))
+    
+    cv.logistic = nnet::multinom(class ~ ., data = train_df_scaled2,maxit = 500)
+    misclass_df[current_row,4] = mean(predict(cv.logistic,newdata = valid_df_scaled2,type = "class")!= valid_df_scaled2$class)
+    
+    
+    # Logist-LASSO(Logistic of Lasso version)
+    logit.fit <- glmnet(x=as.matrix(train_df_scaled2[,-1]), 
+                        y=train_df_scaled2[,1], family="multinomial")
+    logit.cv <- cv.glmnet(x=as.matrix(train_df_scaled2[,-1]), 
+                          y=train_df_scaled2[,1], family="multinomial")
+    
+    # glmnet
+    las0.pred.test <- predict(logit.fit, s=0, type="class",
+                              newx=as.matrix(valid_df_scaled2[,-1]))
+    misclass_df[current_row,5] <- mean(las0.pred.test != valid_df_scaled2$class)
+    
+    # min
+    lasmin.pred.test <- predict(logit.fit, s=logit.cv$lambda.min, type="class",
+                                newx=as.matrix(valid_df_scaled2[,-1]))
+    misclass_df[current_row,6] <- mean(lasmin.pred.test != valid_df_scaled2$class)
+    
+    # 1se
+    las1se.pred.test <- predict(logit.fit, s=logit.cv$lambda.1se, type="class",
+                                newx=as.matrix(valid_df_scaled2[,-1]))
+    misclass_df[current_row,7] <- mean(las1se.pred.test != valid_df_scaled2$class)
+    
+    
+    # LDA
+    train_df_scaled3 <- data.frame(apply(train_df[,-1], 2, scale),class = train_df[,1])
+    valid_df_scaled3 <- data.frame(apply(valid_df[,-1], 2, scale),class = valid_df[,1])
+    cv.lda <- lda(data=train_df_scaled3, class~.)
+    lda.pred.test <- predict(cv.lda, newdata=valid_df_scaled3)$class
+    misclass_df[current_row,8] <- mean(lda.pred.test != valid_df_scaled3$class)
+    
+    
+    # QDA
+    cv.qda <- qda(data=train_df_scaled3, class~.)
+    qda.pred.test <- predict(cv.qda, newdata=valid_df_scaled3)$class
+    misclass_df[current_row,9] <- mean(qda.pred.test != valid_df_scaled3$class)
+    
+    
+    # GAM
+    train_df_num = train_df
+    train_df_num$Y = as.numeric(as.factor(train_df_num$Y))-1
+    bs <- "cr";ctrl <- list(nthreads=12,epsilon = 1e-9,maxit = 1000)
+    start = Sys.time()
+    cv.gam1 <- gam(data=train_df_num, list(Y ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16),
+                                           ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16),
+                                           ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16),
+                                           ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16)),
+                   family = multinom(K=4),control=ctrl)
+    end1 = Sys.time()
+    pred.gam.prob = predict(cv.gam1, valid_df, type = "response")
+    end2 = Sys.time()
+    pred.gam.1 = apply(pred.gam.prob, 1, which.max)
+
+    misclass_df[current_row,10] <-  mean(pred.gam.1!=as.numeric(as.factor(valid_df[,1])))
+    
+    
+    # NB
+    # Normal, No PC
+    cv.NB1 = NaiveBayes(train_df[,-1], train_df[,1], usekernel = F)
+    pred.NB1 = predict(cv.NB1, valid_df)$class
+    misclass_df[current_row,11] <- mean(pred.NB1 != valid_df[,1])
+    
+    # Kernel, No PC
+    cv.NB2 = NaiveBayes(train_df[,-1], train_df[,1], usekernel = T)
+    pred.NB2 = predict(cv.NB2, valid_df)$class
+    misclass_df[current_row,12] <- mean(pred.NB2 != valid_df[,1])
+    
+    fit.PCA = prcomp(train_df[,-1], scale. = T)
+    train_df.PC = fit.PCA$x  # Extract the PCs
+    valid_df.PC = predict(fit.PCA, valid_df)
+    
+    # Normal, PC
+    cv.NB3 = NaiveBayes(train_df.PC, train_df[,1], usekernel = F)
+    pred.NB3 = predict(cv.NB3, valid_df.PC)$class
+    misclass_df[current_row,13] <- mean(pred.NB3 != valid_df[,1])
+    # Kernel, PC
+    cv.NB4 = NaiveBayes(train_df.PC, train_df[,1], usekernel = T)
+    pred.NB4 = predict(cv.NB4, valid_df.PC)$class
+    misclass_df[current_row,14] <- mean(pred.NB4 != valid_df[,1])
+    
+    
+    # Random Forest
+    cv.rf <- randomForest(data=train_df, Y~.)
+    misclass_df[current_row,15] <-mean(predict(cv.rf,valid_df)!= valid_df$Y)
+    current_row = current_row + 1  
+    }
+}
+# Relative Boxplot
+low.s = apply(misclass_df, 1, min)
+boxplot(misclass_df/low.s, las = 2, ylim = c(1,1.5),
+        main=paste0("Plot for misclassification rate on ",V,"-folds validation"))
+
+
