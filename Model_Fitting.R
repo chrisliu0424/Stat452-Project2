@@ -5,20 +5,19 @@ library(glmnet)
 library(mgcv)   # For GAM
 library(klaR)   # For naive Bayes
 library(randomForest)
+library(dplyr)
+library(e1071)
 
 source("Helper Functions.R")
 df = read.csv("Original_data/P2Data2020.csv")
+df = dplyr::select(df,-X3,-X5,-X15)
 df$Y = as.factor(df$Y)
 
-require(parallel)  
-nc <- 12   ## cluster size, set for example portability
-if (detectCores()>1) { ## no point otherwise
-  cl <- makeCluster(nc) 
-  ## could also use makeForkCluster, but read warnings first!
-} else cl <- NULL
 
 X = df[,-1]
 Y = df[,1]
+Y.num = class.ind(Y)
+
 
 data.matrix.raw = model.matrix(Y ~ ., data = df)
 data.matrix = data.matrix.raw[,-1]
@@ -29,7 +28,7 @@ R = 1     # number of Replicates
 n = nrow(X)
 folds = get.folds(n,V) 
 names = c("Knn-1","Knn-min","Knn-1se","Logistic","Logist-glmnet","Logist-LASSO-min","Logist-LASSO-1se","LDA","QDA",
-          "GAM","NB:Normal","NB:Kernel","NB:Normal PC","NB:Kernel PC","RF")
+          "GAM","NB:Normal","NB:Kernel","NB:Normal PC","NB:Kernel PC","RF","NN","SVM")
 misclass_df = matrix(NA,ncol = length(names), nrow = V*R)
 colnames(misclass_df) <- names
 
@@ -73,7 +72,7 @@ for (i in 1:R) {
     train_df_scaled2 = data.frame(cbind(class = train_df[,1],rescale(train_df[,-1],train_df[,-1])))
     valid_df_scaled2 = data.frame(cbind(class = valid_df[,1],rescale(valid_df[,-1],train_df[,-1])))
     
-    cv.logistic = nnet::multinom(class ~ ., data = train_df_scaled2,maxit = 500)
+    cv.logistic = nnet::multinom(class ~ ., data = train_df_scaled2,maxit = 2000)
     misclass_df[current_row,4] = mean(predict(cv.logistic,newdata = valid_df_scaled2,type = "class")!= valid_df_scaled2$class)
     
     
@@ -114,21 +113,22 @@ for (i in 1:R) {
     
     
     # GAM
-    train_df_num = train_df
-    train_df_num$Y = as.numeric(as.factor(train_df_num$Y))-1
-    bs <- "cr";ctrl <- list(nthreads=12,epsilon = 1e-9,maxit = 1000)
-    start = Sys.time()
-    cv.gam1 <- gam(data=train_df_num, list(Y ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16),
-                                           ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16),
-                                           ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16),
-                                           ~ s(X1) + s(X2) +s(X3) +s(X4) +s(X5) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X11) +s(X12) +s(X13) +s(X14) + s(X15) +s(X16)),
-                   family = multinom(K=4),control=ctrl)
-    end1 = Sys.time()
-    pred.gam.prob = predict(cv.gam1, valid_df, type = "response")
-    end2 = Sys.time()
-    pred.gam.1 = apply(pred.gam.prob, 1, which.max)
-
-    misclass_df[current_row,10] <-  mean(pred.gam.1!=as.numeric(as.factor(valid_df[,1])))
+    # train_df_num = train_df
+    # train_df_num$Y = as.numeric(as.factor(train_df_num$Y))-1
+    # ctrl <- list(epsilon = 1e-11,maxit = 1000)
+    # start = Sys.time()
+    # cv.gam1 <- gam(data=train_df_num, family = multinom(K=4),control=ctrl,
+    #                list(Y ~ +s(X6) +s(X9) +s(X14) ,
+    #                     ~ s(X2) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X13),
+    #                     ~ s(X1) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10) +s(X12) +s(X16),
+    #                     ~+s(X6) +s(X8) +s(X9) +s(X12) + s(X15) +s(X16))
+    #                )
+    # end1 = Sys.time()
+    # pred.gam.prob = predict(cv.gam1, valid_df, type = "response")
+    # end2 = Sys.time()
+    # pred.gam.1 = apply(pred.gam.prob, 1, which.max)
+    # 
+    # misclass_df[current_row,10] <-  mean(pred.gam.1!=as.numeric(as.factor(valid_df[,1])))
     
     
     # NB
@@ -157,13 +157,46 @@ for (i in 1:R) {
     
     
     # Random Forest
-    cv.rf <- randomForest(data=train_df, Y~.)
+    cv.rf <- randomForest(data=train_df, Y~.,nodesize = 6, mtry = 3)
     misclass_df[current_row,15] <-mean(predict(cv.rf,valid_df)!= valid_df$Y)
+    
+    
+    # NN
+    train_df_scaled4 = data.frame(cbind(class = train_df[,1],rescale(train_df[,-1],train_df[,-1])))
+    valid_df_scaled4 = data.frame(cbind(class = valid_df[,1],rescale(valid_df[,-1],train_df[,-1])))
+    MSE.best = Inf    ### Initialize sMSE to largest possible value (infinity)
+    M = 20            ### Number of times to refit.
+    Y.train.num = class.ind(train_df_scaled4$class)
+    for(i in 1:M){
+      ### For convenience, we stop nnet() from printing information about
+      ### the fitting process by setting trace = F.
+      this.nnet = nnet(train_df_scaled4[,-1], Y.train.num, size = 3, decay = 0.1, maxit = 2000, 
+                       softmax = T, trace = F)
+      this.MSE = this.nnet$value
+      if(this.MSE < MSE.best){
+        MSE.best = this.MSE
+        cv.nn = this.nnet
+      }
+    }
+    misclass_df[current_row,16] <-mean(predict(cv.nn,newdata = valid_df_scaled4[,-1],type = "class") != valid_df$Y)
+    
+    
+    # SVM
+    cv.svm = svm(data = train_df, Y~., kernel = "radial", gamma = 10^(-1),cost = 10^(1))
+    misclass_df[current_row,17] <-mean(predict(cv.svm,newdata = valid_df) != valid_df$Y)
+    
+    
+    
+    
     current_row = current_row + 1  
+    
+    
     }
 }
 # Relative Boxplot
+misclass_df = misclass_df[,-10]
 low.s = apply(misclass_df, 1, min)
+boxplot(misclass_df)
 boxplot(misclass_df/low.s, las = 2, ylim = c(1,1.5),
         main=paste0("Plot for misclassification rate on ",V,"-folds validation"))
 
