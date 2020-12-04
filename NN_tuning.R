@@ -2,7 +2,7 @@ rm(list = ls())
 library(nnet)
 library(dplyr)
 
-
+# Best node = 8, decay = 0.01
 source("Helper Functions.R")
 df = read.csv("Original_data/P2Data2020.csv")
 df$Y = as.factor(df$Y)
@@ -11,8 +11,8 @@ X = df[,-1]
 X = select(X,-X3,-X5,-X15)
 Y = df[,1]
 Y.num = class.ind(Y)
-
-all.sizes = c(3,6,9,12,15,18)
+# 7,8,9,10,11
+all.sizes = c(7,8,9,10,11)
 all.decays = c(0, 0.001, 0.01, 0.1, 1)
 all.pars = expand.grid(size = all.sizes, decay = all.decays)
 n.pars = nrow(all.pars)

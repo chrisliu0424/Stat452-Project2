@@ -37,3 +37,5 @@ boxplot(t(t(1-resamples[,-c(1:2)])/(1-best)) ~ resamples[,2], xlab="Sigma", ylab
 
 
 stopCluster(cl)
+
+# Best C = 10^3, sigma = 10^-3
