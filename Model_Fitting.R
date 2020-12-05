@@ -10,7 +10,9 @@ library(e1071)
 
 source("Helper Functions.R")
 df = read.csv("Original_data/P2Data2020.csv")
-df = dplyr::select(df,-X3,-X5,-X15)
+df = dplyr::select(df,-X3,-X5)
+# df = dplyr::select(df,-X3,-X5,-X15)
+# df = dplyr::select(df,X1,X2,X3,X6,X7,X8,X9,X12,X13,X16)
 df$Y = as.factor(df$Y)
 
 
@@ -28,7 +30,7 @@ R = 5     # number of Replicates
 n = nrow(X)
 folds = get.folds(n,V) 
 names = c("Knn-1","Knn-min","Knn-1se","Logistic","Logist-glmnet","Logist-LASSO-min","Logist-LASSO-1se","LDA","QDA",
-          "GAM","NB:Normal","NB:Kernel","NB:Normal PC","NB:Kernel PC","RF","NN","SVM","Bagging")
+          "GAM","NB:Normal","NB:Kernel","NB:Normal PC","NB:Kernel PC","RF","NN","SVM","Bagging","RF2")
 misclass_df = matrix(NA,ncol = length(names), nrow = V*R)
 colnames(misclass_df) <- names
 
@@ -121,8 +123,8 @@ for (i in 1:R) {
     ctrl <- list(epsilon = 1e-11,maxit = 1000)
     start = Sys.time()
     cv.gam1 <- gam(data=train_df_num, family = multinom(K=4),control=ctrl,
-                   list(Y ~ +s(X6) +s(X9) +s(X14) ,
-                        ~ s(X2) +s(X6) +s(X7) +s(X8) +s(X9) +s(X10),
+                   list(Y ~ +s(X6) +s(X9) ,
+                        ~ s(X2) +s(X6) +s(X7) +s(X8) +s(X9),
                         ~ s(X6) +s(X7) +s(X8) +s(X9) +s(X10),
                         ~ s(X6) +s(X8) +s(X9) +s(X12))
                    )
@@ -210,6 +212,10 @@ for (i in 1:R) {
     pred.bag.factor = as.factor(pred.bag)
     levels(pred.bag.factor) <- c("A","B","C","D","E")
     misclass_df[current_row,18] <- mean(pred.bag.factor != valid_df$Y)
+    
+    cv.rf2 <- randomForest(data=train_df, Y~.,nodesize = 8, mtry = 4)
+    pred.rf2 = predict(cv.rf2,valid_df)
+    misclass_df[current_row,19] <-mean(pred.rf2!= valid_df$Y)
 
     current_row = current_row + 1  
     }
